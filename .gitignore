@@ -1,0 +1,5 @@
+badge-farm-*.json
+__pycache__/
+*.db
+*.db-*
+*.sqlite*
