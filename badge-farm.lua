@@ -85,6 +85,11 @@ local function stopWithError(message)
     warn("Badge farm: " .. tostring(message))
 end
 
+local function ownerText(info)
+    if not info or not info.creator then return "unknown creator" end
+    return tostring(info.creator.name or info.creator.id or "unknown creator")
+end
+
 env.BadgeFarmStop = function()
     running = false
     for _, connection in ipairs(connections) do connection:Disconnect() end
@@ -122,30 +127,40 @@ for _, name in ipairs({ "BadgeAwarded", "OnBadgeAwarded" }) do
 end
 if badgeEventCount == 0 then warn("Badge farm: badge events unavailable; using the 10-second timer.") end
 
-local function teleportFailed(message)
+local function teleportFailed(result, message)
     if not pending then return end
     local id = pending.id
+    local targetInfo = pending.info
     pending = nil
     state.resumeTarget = nil
     pcall(save)
     local text = tostring(message):lower()
-    if text:find("different creator", 1, true) or text:find("third party", 1, true) then
-        stopWithError("This game blocks teleports to other creators. Join another game manually, then turn ON again.")
+    local unauthorized = false
+    pcall(function()
+        unauthorized = result == Enum.TeleportResult.Unauthorized
+    end)
+    if unauthorized or text:find("different creator", 1, true) or text:find("third party", 1, true) then
+        local source = tostring(game.GameId)
+        local sourceName = tostring(game.Name or source)
+        local sourceCreator = tostring(game.CreatorId or "unknown")
+        local targetName = targetInfo and targetInfo.name or id
+        local targetCreator = ownerText(targetInfo)
+        stopWithError(("Roblox denied the cross-creator hop: %s (%s, creator %s) -> %s (creator %s). This source experience does not allow third-party teleports; age/content access is not the cause. Start from an experience you control with Allow Third Party Teleports enabled. The setting cannot be changed by this script."):format(sourceName, source, sourceCreator, targetName, targetCreator))
     else
         skipped[id] = true
         retryAt = os.clock() + 3
         warn("Badge farm: destination " .. id .. " rejected; trying another in 3 seconds. " .. tostring(message))
     end
 end
-table.insert(connections, Teleports.TeleportInitFailed:Connect(function(who, _, message, placeId)
-    if who == player and pending and pending.place == placeId then teleportFailed(message) end
+table.insert(connections, Teleports.TeleportInitFailed:Connect(function(who, result, message, placeId)
+    if who == player and pending and pending.place == placeId then teleportFailed(result, message) end
 end))
 
 local function resolve(id)
     local result = Http:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games?universeIds=" .. id))
     for _, info in ipairs(result.data or {}) do
         if tostring(info.id) == id and tonumber(info.rootPlaceId) and info.rootPlaceId > 0 then
-            return info.rootPlaceId
+            return info.rootPlaceId, info
         end
     end
     return nil -- A valid response with no destination; safe to skip this ID.
@@ -171,7 +186,7 @@ task.spawn(function()
             if not nextId then
                 stopWithError("Finished available games. Failed games can be retried by rerunning the script.")
             else
-                local ok, place = pcall(resolve, nextId)
+                local ok, place, info = pcall(resolve, nextId)
                 if not running then return end
                 if not ok then
                     lookupFailures = lookupFailures + 1
@@ -203,10 +218,10 @@ task.spawn(function()
                     if not success then
                         stopWithError(err)
                     else
-                        pending = { id = nextId, place = place }
+                        pending = { id = nextId, place = place, info = info }
                         local sent, message = pcall(function() Teleports:Teleport(place, player) end)
                         if not sent then
-                            teleportFailed(message)
+                            teleportFailed(nil, message)
                         end
                         -- Wait for arrival or TeleportInitFailed; overlapping teleports are unsafe.
                     end
