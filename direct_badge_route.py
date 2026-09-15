@@ -40,6 +40,40 @@ class RouteError(RuntimeError):
     """An expected route or API error."""
 
 
+class RouteStopped(RouteError):
+    """The desktop controller requested a clean stop."""
+
+
+def write_json_file(path: Path, payload: Any) -> None:
+    """Write JSON atomically so the UI never reads a half-written file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def read_control(path: Path | None) -> str | None:
+    """Read a controller command, if a GUI supplied one."""
+
+    if path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    command = payload.get("command") if isinstance(payload, dict) else None
+    if not isinstance(command, str):
+        return None
+    command = command.lower()
+    return command if command in {"pause", "resume", "stop"} else None
+
+
+def write_status(path: Path | None, payload: dict[str, Any]) -> None:
+    if path is not None:
+        write_json_file(path, payload)
+
+
 def parse_universe_ids(path: Path, *, allow_empty: bool = False) -> list[str]:
     """Read positive universe IDs, preserving order and removing duplicates."""
 
@@ -296,8 +330,6 @@ def load_state(path: Path) -> dict[str, Any]:
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
     payload = {
         "version": 2,
         "completed_universes": list(dict.fromkeys(str(item) for item in state.get("completed_universes", []))),
@@ -305,8 +337,7 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         "badge_universes": list(dict.fromkeys(str(item) for item in state.get("badge_universes", []))),
         "last_universe": state.get("last_universe"),
     }
-    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    write_json_file(path, payload)
 
 
 def _mark_completed(state: dict[str, Any], universe_id: str) -> None:
@@ -335,6 +366,8 @@ def run_route(
     output: Callable[[str], None] = print,
     save_progress: Callable[[dict[str, Any]], None] | None = None,
     save_badges: Callable[[dict[str, Any]], None] | None = None,
+    control_file: Path | None = None,
+    status_update: Callable[[str, str | None, str | None, str | None], None] | None = None,
 ) -> dict[str, Any]:
     """Process the route once and return the updated state."""
 
@@ -350,7 +383,33 @@ def run_route(
     )
     completed = set(str(item) for item in state.get("completed_universes", []))
 
+    def emit(status: str, universe_id: str | None = None, title: str | None = None, message: str | None = None) -> None:
+        if status_update is not None:
+            status_update(status, universe_id, title, message)
+
+    def wait_if_paused(
+        deadline: float | None,
+        universe_id: str | None,
+        title: str | None,
+    ) -> float | None:
+        paused_at: float | None = None
+        while True:
+            command = read_control(control_file)
+            if command == "stop":
+                raise RouteStopped("stopped by controller")
+            if command != "pause":
+                if paused_at is not None:
+                    if deadline is not None:
+                        deadline += monotonic() - paused_at
+                    emit("running", universe_id, title, "resumed")
+                return deadline
+            if paused_at is None:
+                paused_at = monotonic()
+                emit("paused", universe_id, title, "paused by controller")
+            sleep(0.2)
+
     for universe_id in universe_ids:
+        wait_if_paused(None, universe_id, None)
         if universe_id in completed:
             output(f"skip {universe_id}: already completed")
             continue
@@ -377,7 +436,9 @@ def run_route(
 
         uri = build_launch_uri(destination["place_id"])
         title = destination.get("name") or universe_id
+        wait_if_paused(None, universe_id, title)
         output(f"{universe_id} -> {title} (place {destination['place_id']})")
+        emit("launching", universe_id, title, f"place {destination['place_id']}")
         if not launch:
             continue
 
@@ -394,8 +455,14 @@ def run_route(
         if startup_seconds:
             sleep(startup_seconds)
         deadline = monotonic() + seconds
+        emit("waiting", universe_id, title, f"{seconds:g}-second window")
         awarded: str | None = None
         while monotonic() < deadline:
+            deadline = wait_if_paused(deadline, universe_id, title)
+            if deadline is None:
+                break
+            if monotonic() >= deadline:
+                break
             if badge_poll_enabled and checker is not None and badge_ids:
                 try:
                     awarded = checker.find_new(badge_ids, baseline)
@@ -412,13 +479,14 @@ def run_route(
                     break
             remaining = deadline - monotonic()
             if remaining > 0:
-                sleep(min(poll_seconds, remaining))
+                sleep(min(0.2, poll_seconds, remaining))
         if not awarded:
             output(f"{seconds:g}-second window elapsed for {universe_id}; continuing")
         _mark_completed(state, universe_id)
         completed.add(universe_id)
         if save_progress is not None:
             save_progress(state)
+        emit("completed", universe_id, title, "badge detected" if awarded else "timer elapsed")
         output(f"completed {universe_id}")
 
     return state
@@ -438,6 +506,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="resolve and print places without opening Roblox")
     parser.add_argument("--no-badge-check", action="store_true", help="use the timer without ownership API calls")
     parser.add_argument("--reset", action="store_true", help="delete the saved route state and exit")
+    parser.add_argument("--status-file", type=Path, help="JSON status file for the desktop controller")
+    parser.add_argument("--control-file", type=Path, help="JSON pause/resume/stop command file")
     return parser
 
 
@@ -463,9 +533,39 @@ def main(argv: list[str] | None = None) -> int:
             pass
         print(f"reset {args.state}")
         return 0
+    state: dict[str, Any] | None = None
+    status_update: Callable[[str, str | None, str | None, str | None], None] | None = None
     try:
         universe_ids = parse_universe_ids(args.games)
         state = load_state(args.state)
+        positions = {universe_id: index + 1 for index, universe_id in enumerate(universe_ids)}
+
+        def update_status(
+            status: str,
+            universe_id: str | None = None,
+            title: str | None = None,
+            message: str | None = None,
+        ) -> None:
+            if args.status_file is None or state is None:
+                return
+            write_status(
+                args.status_file,
+                {
+                    "status": status,
+                    "total": len(universe_ids),
+                    "completed": len(state.get("completed_universes", [])),
+                    "badges": len(state.get("badge_universes", [])),
+                    "failed": len(state.get("failed_universes", {})),
+                    "current_index": positions.get(universe_id),
+                    "current_universe": universe_id,
+                    "current_name": title,
+                    "message": message,
+                    "updated_at": time.time(),
+                },
+            )
+
+        status_update = update_status
+        update_status("resolving", message="resolving game places")
         source_ids = set(universe_ids)
         output_badges = (
             [item for item in parse_universe_ids(args.badge_output, allow_empty=True) if item in source_ids]
@@ -482,6 +582,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise RouteError("--limit must be positive")
             pending = pending[: args.limit]
         if not pending:
+            update_status("finished", message="no uncompleted destinations")
             print("no uncompleted destinations")
             return 0
         destinations = resolve_destinations(pending)
@@ -502,10 +603,22 @@ def main(argv: list[str] | None = None) -> int:
                 args.badge_output,
                 [item for item in universe_ids if item in set(current.get("badge_universes", []))],
             ),
+            control_file=args.control_file,
+            status_update=status_update,
         )
         save_state(args.state, state)
+        update_status("finished", message="route complete")
+        return 0
+    except RouteStopped as exc:
+        if state is not None:
+            save_state(args.state, state)
+        if status_update is not None:
+            status_update("stopped", message=str(exc))
+        print(str(exc))
         return 0
     except (OSError, RouteError, ValueError) as exc:
+        if status_update is not None:
+            status_update("error", message=str(exc))
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

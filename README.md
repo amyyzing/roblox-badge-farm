@@ -1,5 +1,17 @@
 # Badge farm
 
+## Desktop controller
+
+Use the small Tkinter app when you want visible progress and controls:
+
+```powershell
+py badge_route_app.py
+```
+
+Enter the Roblox user ID, then use **Start**, **Pause**, **Resume**, **Stop**, **Reset progress**, and **Clear badge list**. The window shows completed destinations, badge games, failures, the current destination, and the worker log. The app starts the same direct launcher as the command line and keeps its progress in the same files, so closing the window does not discard a saved checkpoint.
+
+The linked [Roblox Live LSP](https://gitlab.com/upio/roblox-live-lsp) is useful for Luau editing and live DataModel/type synchronization. It does not expose server badge-award events or make the public badge endpoint update faster, so it is not used by the controller.
+
 ## Direct launcher (recommended for unrelated games)
 
 The Windows controller in [`direct_badge_route.py`](direct_badge_route.py) opens each game's starting place directly through Roblox. That avoids relying on the current game's `TeleportService` permission, which is why a route can stop after reaching an experience owned by another creator.

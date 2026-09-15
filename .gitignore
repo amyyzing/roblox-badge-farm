@@ -5,3 +5,5 @@ __pycache__/
 *.db
 *.db-*
 *.sqlite*
+badge-route-ui-*.json
+.badge-route-ui-*.json

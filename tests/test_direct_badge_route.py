@@ -158,6 +158,60 @@ class DirectBadgeRouteTests(unittest.TestCase):
             self.assertEqual(loaded["badge_universes"], ["5"])
             self.assertFalse(path.with_name("state.json.tmp").exists())
 
+    def test_pause_resume_extends_the_timer_and_reports_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "control.json"
+            control.write_text('{"command":"pause"}', encoding="utf-8")
+            clock = FakeClock()
+            state = route.new_state()
+            statuses = []
+            sleeps = 0
+
+            def sleep(seconds):
+                nonlocal sleeps
+                sleeps += 1
+                clock.sleep(seconds)
+                if sleeps == 3:
+                    control.write_text('{"command":"resume"}', encoding="utf-8")
+
+            route.run_route(
+                ["1"],
+                state=state,
+                destinations={"1": {"place_id": 101, "name": "One"}},
+                user_id=None,
+                seconds=2,
+                poll_seconds=1,
+                startup_seconds=0,
+                launch=True,
+                badge_check=False,
+                sleep=sleep,
+                monotonic=clock.monotonic,
+                launch_fn=lambda _: None,
+                control_file=control,
+                status_update=lambda status, *_: statuses.append(status),
+                output=lambda _: None,
+            )
+            self.assertEqual(state["completed_universes"], ["1"])
+            self.assertIn("paused", statuses)
+            self.assertIn("running", statuses)
+
+    def test_stop_command_stops_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "control.json"
+            control.write_text('{"command":"stop"}', encoding="utf-8")
+            with self.assertRaises(route.RouteStopped):
+                route.run_route(
+                    ["1"],
+                    state=route.new_state(),
+                    destinations={"1": {"place_id": 101, "name": "One"}},
+                    user_id=None,
+                    launch=True,
+                    badge_check=False,
+                    control_file=control,
+                    launch_fn=lambda _: self.fail("stop command launched a place"),
+                    output=lambda _: None,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
