@@ -20,6 +20,8 @@ py direct_badge_route.py --user-id YOUR_USER_ID --launch
 
 That command processes every uncompleted ID in `games.txt`; leave out `--limit` for the full list. Destination lookups are paced and retry Roblox rate-limit responses, so a large list can take a little time to prepare.
 
+`games.txt` is the input source. When the ownership check sees a new badge, the controller writes that universe ID to `game-badges.txt`, one ID per line in the same format. The output is kept in the order of `games.txt` and contains each ID once. Delete `game-badges.txt` if you want to rebuild the results from scratch.
+
 For a timer-only run, omit badge ownership calls:
 
 ```powershell
@@ -61,3 +63,5 @@ Innovation Labs (`7065948`) is currently kept at the end of the hosted route bec
 Requires executor support for file access, `getgenv`, `game:HttpGet`, `loadstring`, and `queue_on_teleport` (or its supported aliases). Automatic continuation depends on the executor running queued scripts after teleport. This is not a normal Studio LocalScript.
 
 Early departure uses Roblox's restricted badge events. If the executor cannot connect to them, the script warns and uses the timer. Events awarded before the script starts listening may be missed. Live badge delivery and cross-game continuation still need testing in your executor.
+
+When a badge event is received for the local player, the executor path also appends that universe ID to `game-badges.txt` using the same format as the desktop controller.

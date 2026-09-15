@@ -32,6 +32,7 @@ DEFAULT_SECONDS = 10.0
 DEFAULT_POLL_SECONDS = 1.0
 DEFAULT_STARTUP_SECONDS = 5.0
 DEFAULT_STATE = "badge-route-state.json"
+DEFAULT_BADGE_OUTPUT = "game-badges.txt"
 USER_AGENT = "roblox-badge-farm-direct/1.0"
 
 
@@ -39,7 +40,7 @@ class RouteError(RuntimeError):
     """An expected route or API error."""
 
 
-def parse_universe_ids(path: Path) -> list[str]:
+def parse_universe_ids(path: Path, *, allow_empty: bool = False) -> list[str]:
     """Read positive universe IDs, preserving order and removing duplicates."""
 
     result: list[str] = []
@@ -54,9 +55,19 @@ def parse_universe_ids(path: Path) -> list[str]:
         if value not in seen:
             seen.add(value)
             result.append(value)
-    if not result:
+    if not result and not allow_empty:
         raise RouteError(f"{path} does not contain any universe IDs")
     return result
+
+
+def write_universe_ids(path: Path, universe_ids: Iterable[str]) -> None:
+    """Write a normalized one-universe-ID-per-line list atomically."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    lines = list(dict.fromkeys(str(item) for item in universe_ids))
+    temporary.write_text("" if not lines else "\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _request_json_once(url: str, timeout: float = 20.0) -> Any:
@@ -252,7 +263,13 @@ def open_place(uri: str) -> None:
 
 
 def new_state() -> dict[str, Any]:
-    return {"version": 1, "completed_universes": [], "failed_universes": {}, "last_universe": None}
+    return {
+        "version": 2,
+        "completed_universes": [],
+        "failed_universes": {},
+        "badge_universes": [],
+        "last_universe": None,
+    }
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -266,11 +283,13 @@ def load_state(path: Path) -> dict[str, Any]:
         raise RouteError(f"state file {path} must contain a JSON object")
     completed = data.get("completed_universes", [])
     failed = data.get("failed_universes", {})
-    if not isinstance(completed, list) or not isinstance(failed, dict):
+    badges = data.get("badge_universes", [])
+    if not isinstance(completed, list) or not isinstance(failed, dict) or not isinstance(badges, list):
         raise RouteError(f"state file {path} has an invalid shape")
     normalized = new_state()
     normalized["completed_universes"] = list(dict.fromkeys(str(item) for item in completed if str(item).isdigit()))
     normalized["failed_universes"] = {str(key): str(value) for key, value in failed.items()}
+    normalized["badge_universes"] = list(dict.fromkeys(str(item) for item in badges if str(item).isdigit()))
     last = data.get("last_universe")
     normalized["last_universe"] = str(last) if last is not None else None
     return normalized
@@ -280,9 +299,10 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     payload = {
-        "version": 1,
+        "version": 2,
         "completed_universes": list(dict.fromkeys(str(item) for item in state.get("completed_universes", []))),
         "failed_universes": {str(key): str(value) for key, value in state.get("failed_universes", {}).items()},
+        "badge_universes": list(dict.fromkeys(str(item) for item in state.get("badge_universes", []))),
         "last_universe": state.get("last_universe"),
     }
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -314,6 +334,7 @@ def run_route(
     launch_fn: Callable[[str], None] = open_place,
     output: Callable[[str], None] = print,
     save_progress: Callable[[dict[str, Any]], None] | None = None,
+    save_badges: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Process the route once and return the updated state."""
 
@@ -383,6 +404,11 @@ def run_route(
                     badge_poll_enabled = False
                 if awarded:
                     output(f"badge {awarded} detected in {universe_id}; continuing")
+                    badge_universes = state.setdefault("badge_universes", [])
+                    if universe_id not in badge_universes:
+                        badge_universes.append(universe_id)
+                        if save_badges is not None:
+                            save_badges(state)
                     break
             remaining = deadline - monotonic()
             if remaining > 0:
@@ -401,6 +427,7 @@ def run_route(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--games", type=Path, default=Path("games.txt"), help="universe IDs, one per line")
+    parser.add_argument("--badge-output", type=Path, default=Path(DEFAULT_BADGE_OUTPUT), help="output IDs that award a new badge")
     parser.add_argument("--state", type=Path, default=Path(DEFAULT_STATE), help="local progress JSON")
     parser.add_argument("--user-id", type=int, help="Roblox user ID used for public badge ownership checks")
     parser.add_argument("--seconds", type=float, default=DEFAULT_SECONDS, help="seconds to stay after launch")
@@ -439,6 +466,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         universe_ids = parse_universe_ids(args.games)
         state = load_state(args.state)
+        source_ids = set(universe_ids)
+        output_badges = (
+            [item for item in parse_universe_ids(args.badge_output, allow_empty=True) if item in source_ids]
+            if args.badge_output.exists()
+            else []
+        )
+        state_badges = [str(item) for item in state.get("badge_universes", []) if str(item) in source_ids]
+        state["badge_universes"] = list(dict.fromkeys(output_badges + state_badges))
+        write_universe_ids(args.badge_output, [item for item in universe_ids if item in set(state["badge_universes"])])
         completed = set(str(item) for item in state.get("completed_universes", []))
         pending = [item for item in universe_ids if item not in completed]
         if args.limit is not None:
@@ -462,6 +498,10 @@ def main(argv: list[str] | None = None) -> int:
             launch=args.launch,
             badge_check=not args.no_badge_check,
             save_progress=lambda current: save_state(args.state, current),
+            save_badges=lambda current: write_universe_ids(
+                args.badge_output,
+                [item for item in universe_ids if item in set(current.get("badge_universes", []))],
+            ),
         )
         save_state(args.state, state)
         return 0

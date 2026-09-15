@@ -65,6 +65,34 @@ do
     ids = regular
 end
 
+-- Keep a local, one-universe-ID-per-line list of games that awarded this user
+-- a badge during a run. The desktop controller writes the same file.
+local badgeOutputFile = "game-badges.txt"
+local badgeGames = {}
+if isfile(badgeOutputFile) then
+    local ok, contents = pcall(readfile, badgeOutputFile)
+    if ok and type(contents) == "string" then
+        for line in contents:gmatch("[^\r\n]+") do
+            local id = line:match("^%s*(%d+)%s*$")
+            if id then badgeGames[tostring(tonumber(id))] = true end
+        end
+    end
+end
+local function saveBadgeGames()
+    local lines = {}
+    for _, id in ipairs(ids) do
+        if badgeGames[id] then table.insert(lines, id) end
+    end
+    writefile(badgeOutputFile, #lines > 0 and (table.concat(lines, "\n") .. "\n") or "")
+end
+local function recordBadgeGame()
+    local id = tostring(game.GameId)
+    if id ~= "0" and not badgeGames[id] then
+        badgeGames[id] = true
+        pcall(saveBadgeGames)
+    end
+end
+
 local running, earned, pending, queued = true, false, nil, false
 local deadline = os.clock() + 10
 local retryAt, lookupFailures = 0, 0
@@ -124,7 +152,10 @@ end))
 
 -- These internal events require executor support. The timer still works without them.
 local function badgeReceived(userId)
-    if tonumber(userId) == player.UserId then earned = true end
+    if tonumber(userId) == player.UserId then
+        earned = true
+        recordBadgeGame()
+    end
 end
 local badgeEventCount = 0
 for _, name in ipairs({ "BadgeAwarded", "OnBadgeAwarded" }) do
