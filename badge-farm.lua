@@ -12,6 +12,21 @@ local env = getgenv()
 if env.BadgeFarmStop then env.BadgeFarmStop() end
 local player = Players.LocalPlayer
 while not player do task.wait(); player = Players.LocalPlayer end
+local playerGui = player:WaitForChild("PlayerGui")
+-- Executor and MCP environments may not share getgenv().
+for _, oldGui in ipairs(playerGui:GetChildren()) do
+    if oldGui.Name == "BadgeFarm" then
+        local stop = oldGui:FindFirstChild("Stop")
+        local oldButton = oldGui:FindFirstChildOfClass("TextButton")
+        if stop then
+            stop:Fire()
+        elseif oldButton and oldButton.Text == "ON" then
+            assert(firesignal, "An older farm is running. Turn it OFF before rerunning.")
+            firesignal(oldButton.Activated)
+        end
+        oldGui:Destroy()
+    end
+end
 local stateFile = "badge-farm-" .. player.UserId .. ".json"
 local state = { enabled = false, visited = {} }
 if isfile(stateFile) then
@@ -39,7 +54,7 @@ local gui = Instance.new("ScreenGui")
 gui.Name = "BadgeFarm"
 gui.ResetOnSpawn = false
 gui.DisplayOrder = 2147483647
-gui.Parent = player:WaitForChild("PlayerGui")
+gui.Parent = playerGui
 local button = Instance.new("TextButton")
 button.Size = UDim2.fromOffset(100, 40)
 button.Position = UDim2.fromOffset(15, 100)
@@ -67,6 +82,10 @@ env.BadgeFarmStop = function()
     for _, connection in ipairs(connections) do connection:Disconnect() end
     gui:Destroy()
 end
+local stopEvent = Instance.new("BindableEvent")
+stopEvent.Name = "Stop"
+stopEvent.Parent = gui
+table.insert(connections, stopEvent.Event:Connect(env.BadgeFarmStop))
 table.insert(connections, button.Activated:Connect(function()
     state.enabled = not state.enabled
     if state.enabled then

@@ -7,12 +7,12 @@ local function signal()
 end
 local button
 Instance = {new=function(kind)
- local o = {Destroy=function() end}
+ local o = {Destroy=function() end, Event=signal()}
  if kind == 'TextButton' then o.Activated=signal(); button=o end
  return o
 end}
 UDim2 = {fromOffset=function() return {} end}
-local player = {UserId=7,WaitForChild=function() return {} end}
+local player = {UserId=7,WaitForChild=function() return {GetChildren=function() return {} end} end}
 local badge = {BadgeAwarded=signal(),OnBadgeAwarded=signal()}
 local tp = {TeleportInitFailed=signal(),Teleport=function(_,id) table.insert(teleports,id) end}
 local saved = {enabled=true,visited={}}
@@ -76,3 +76,4 @@ assert(#lookups==3 and not saved.enabled,'lookup retries not bounded')
 assert(lookups[2].time>=15 and lookups[3].time>=45,'lookup cooldown too short')
 for _,lookup in ipairs(lookups) do assert(lookup.id=='2','temporary failure skipped ID') end
 print('PASS: lookup backoff, same-ID retry, final pause')
+
