@@ -3,7 +3,7 @@
 Execute this in your executor:
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/amyyzing/roblox-badge-farm/main/badge-farm.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/amyyzing/roblox-badge-farm/refs/heads/main/badge-farm.lua"))()
 ```
 
 Click **OFF** to turn it **ON**. Click **ON** to pause. The script and game list load from GitHub automatically, including after teleports. No manual file copying is needed.

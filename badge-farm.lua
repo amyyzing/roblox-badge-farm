@@ -1,5 +1,5 @@
 -- Hosted script and universe list; only progress is stored locally.
-local BASE_URL = "https://raw.githubusercontent.com/amyyzing/roblox-badge-farm/main/"
+local BASE_URL = "https://raw.githubusercontent.com/amyyzing/roblox-badge-farm/refs/heads/main/"
 local LOADER = 'getgenv().BadgeFarmResume = true; loadstring(game:HttpGet("' .. BASE_URL .. 'badge-farm.lua"))()'
 local Players = game:GetService("Players")
 local Teleports = game:GetService("TeleportService")
@@ -194,12 +194,21 @@ task.spawn(function()
             for _, id in ipairs(ids) do
                 if not state.visited[id] and not skipped[id] then nextId = id; break end
             end
-            if not nextId then
+            if terminalUniverses[tostring(game.GameId)] then
+                while running and state.enabled and not earned and os.clock() < deadline do
+                    task.wait(0.05)
+                end
+                if running and state.enabled then
+                    stopWithError("This experience is a known outbound-teleport dead end. It was kept last in the route; join another game manually to continue the remaining list.")
+                    return
+                end
+            elseif not nextId then
                 while running and state.enabled and not earned and os.clock() < deadline do
                     task.wait(0.05)
                 end
                 if running then
                     stopWithError("Finished available games. Failed games can be retried by rerunning the script.")
+                    return
                 end
             else
                 local ok, place, info = pcall(resolve, nextId)
