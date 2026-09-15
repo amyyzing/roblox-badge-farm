@@ -255,6 +255,11 @@ class BadgeRouteApp:
             button.configure(state="normal" if running else "disabled")
         if self.worker is not None and not running:
             code = self.worker.returncode
+            if code:
+                self.status_var.set("Worker error")
+                self.current_var.set("Worker stopped before completing; see the log")
+            else:
+                self.status_var.set("Stopped")
             self._append_log(f"Route worker exited ({code})")
             self.worker = None
         self.window.after(500, self._refresh)

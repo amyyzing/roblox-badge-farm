@@ -42,6 +42,7 @@ class DirectBadgeRouteTests(unittest.TestCase):
 
     def test_resolve_destinations_keeps_api_metadata(self):
         calls = []
+        batches = []
 
         def request_json(url):
             calls.append(url)
@@ -52,10 +53,16 @@ class DirectBadgeRouteTests(unittest.TestCase):
                 ]
             }
 
-        destinations = route.resolve_destinations(["1", "2"], request_json=request_json)
+        destinations = route.resolve_destinations(
+            ["1", "2"],
+            request_json=request_json,
+            before_batch=lambda: batches.append("before"),
+            on_batch=lambda current, total, found: batches.append((current, total, found)),
+        )
         self.assertEqual(destinations["1"]["place_id"], 101)
         self.assertEqual(destinations["2"]["name"], "Two")
         self.assertIn("universeIds=1%2C2", calls[0])
+        self.assertEqual(batches, ["before", (1, 1, 2)])
 
     def test_badge_pagination_and_ownership_transition(self):
         clock = FakeClock()

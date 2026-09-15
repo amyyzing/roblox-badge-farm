@@ -156,11 +156,16 @@ def resolve_destinations(
     batch_size: int = 50,
     batch_pause: float = 2.0,
     sleep: Callable[[float], None] = time.sleep,
+    before_batch: Callable[[], None] | None = None,
+    on_batch: Callable[[int, int, int], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve universe IDs to root places and return the API metadata."""
 
     destinations: dict[str, dict[str, Any]] = {}
-    for batch_number, batch in enumerate(_batches(universe_ids, batch_size)):
+    batches = list(_batches(universe_ids, batch_size))
+    for batch_number, batch in enumerate(batches):
+        if before_batch is not None:
+            before_batch()
         if batch_number and batch_pause > 0:
             sleep(batch_pause)
         query = urllib.parse.urlencode({"universeIds": ",".join(batch)})
@@ -179,6 +184,8 @@ def resolve_destinations(
                     "name": str(item.get("name") or universe_id),
                     "creator": item.get("creator"),
                 }
+        if on_batch is not None:
+            on_batch(batch_number + 1, len(batches), len(destinations))
     return destinations
 
 
@@ -566,6 +573,33 @@ def main(argv: list[str] | None = None) -> int:
 
         status_update = update_status
         update_status("resolving", message="resolving game places")
+
+        def wait_for_resolution_control() -> None:
+            paused = False
+            while True:
+                command = read_control(args.control_file)
+                if command == "stop":
+                    raise RouteStopped("stopped by controller")
+                if command != "pause":
+                    if paused:
+                        update_status("resolving", message="resumed place resolution")
+                    return
+                if not paused:
+                    paused = True
+                    update_status("paused", message="paused during place resolution")
+                time.sleep(0.2)
+
+        def controlled_sleep(seconds: float) -> None:
+            remaining = max(0.0, seconds)
+            while remaining > 0:
+                wait_for_resolution_control()
+                interval = min(0.2, remaining)
+                time.sleep(interval)
+                remaining -= interval
+
+        def controlled_request(url: str) -> Any:
+            return get_json(url, sleep=controlled_sleep)
+
         source_ids = set(universe_ids)
         output_badges = (
             [item for item in parse_universe_ids(args.badge_output, allow_empty=True) if item in source_ids]
@@ -585,7 +619,16 @@ def main(argv: list[str] | None = None) -> int:
             update_status("finished", message="no uncompleted destinations")
             print("no uncompleted destinations")
             return 0
-        destinations = resolve_destinations(pending)
+        destinations = resolve_destinations(
+            pending,
+            request_json=controlled_request,
+            sleep=controlled_sleep,
+            before_batch=wait_for_resolution_control,
+            on_batch=lambda current, total, found: update_status(
+                "resolving",
+                message=f"resolved {current}/{total} place batches ({found} destinations)",
+            ),
+        )
         if not args.launch:
             print("dry-run: no Roblox windows will be opened")
         run_route(
@@ -598,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
             startup_seconds=args.startup_seconds,
             launch=args.launch,
             badge_check=not args.no_badge_check,
+            request_json=controlled_request,
             save_progress=lambda current: save_state(args.state, current),
             save_badges=lambda current: write_universe_ids(
                 args.badge_output,
