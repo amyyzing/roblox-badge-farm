@@ -1,5 +1,7 @@
 badge-farm-*.json
+badge-route-state*.json
 __pycache__/
+*.pyc
 *.db
 *.db-*
 *.sqlite*

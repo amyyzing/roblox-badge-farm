@@ -1,5 +1,41 @@
 # Badge farm
 
+## Direct launcher (recommended for unrelated games)
+
+The Windows controller in [`direct_badge_route.py`](direct_badge_route.py) opens each game's starting place directly through Roblox. That avoids relying on the current game's `TeleportService` permission, which is why a route can stop after reaching an experience owned by another creator.
+
+It uses the public Roblox games, badges, and badge-ownership endpoints. It does not need your `.ROBLOSECURITY` cookie. Progress is saved in `badge-route-state.json` (ignored by Git), so a stopped run can continue on the next launch.
+
+Preview the first three uncompleted destinations without opening Roblox:
+
+```powershell
+py direct_badge_route.py --dry-run --limit 3
+```
+
+Run the route for a Roblox user ID. Each destination gets a five-second startup allowance, then a ten-second window. A newly owned badge advances the route immediately; otherwise the timer advances it:
+
+```powershell
+py direct_badge_route.py --user-id YOUR_USER_ID --launch
+```
+
+For a timer-only run, omit badge ownership calls:
+
+```powershell
+py direct_badge_route.py --launch --no-badge-check
+```
+
+Reset saved progress:
+
+```powershell
+py direct_badge_route.py --reset
+```
+
+The default is a dry-run. `--launch` is required before any Roblox window is opened. A launch failure is recorded and the controller continues to the next destination; it can be retried after resetting or editing the saved state. The badge ownership endpoint is rate-limited, so games with many badges take longer to baseline. Roblox access rules, age/content restrictions, private servers, and experiences that do not award a badge cannot be bypassed by this tool.
+
+The linked [Roblox Account Manager Pro](https://github.com/TheFadGhost/roblox-account-manager-pro-public) repository can be used as a separate account/session launcher, but this controller intentionally does not read cookies or automate an executor. Roblox must already be installed and associated with the `roblox://` protocol.
+
+## In-game executor script
+
 Execute this in your executor:
 
 ```lua
