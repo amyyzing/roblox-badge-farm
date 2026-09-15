@@ -78,7 +78,21 @@ def get_json(
     for attempt in range(max(1, retries)):
         try:
             return _request_json_once(url, timeout)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if attempt + 1 < retries:
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                try:
+                    if retry_after:
+                        delay = max(1.0, float(retry_after))
+                    elif exc.code == 429:
+                        delay = 15.0 * (attempt + 1)
+                    else:
+                        delay = float(attempt + 1)
+                except ValueError:
+                    delay = 15.0 * (attempt + 1) if exc.code == 429 else float(attempt + 1)
+                sleep(delay)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_error = exc
             if attempt + 1 < retries:
                 sleep(float(attempt + 1))
@@ -95,11 +109,15 @@ def resolve_destinations(
     *,
     request_json: Callable[[str], Any] = get_json,
     batch_size: int = 50,
+    batch_pause: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, dict[str, Any]]:
     """Resolve universe IDs to root places and return the API metadata."""
 
     destinations: dict[str, dict[str, Any]] = {}
-    for batch in _batches(universe_ids, batch_size):
+    for batch_number, batch in enumerate(_batches(universe_ids, batch_size)):
+        if batch_number and batch_pause > 0:
+            sleep(batch_pause)
         query = urllib.parse.urlencode({"universeIds": ",".join(batch)})
         payload = request_json(f"{GAMES_API}?{query}")
         if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):

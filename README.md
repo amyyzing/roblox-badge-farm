@@ -18,6 +18,8 @@ Run the route for a Roblox user ID. Each destination gets a five-second startup 
 py direct_badge_route.py --user-id YOUR_USER_ID --launch
 ```
 
+That command processes every uncompleted ID in `games.txt`; leave out `--limit` for the full list. Destination lookups are paced and retry Roblox rate-limit responses, so a large list can take a little time to prepare.
+
 For a timer-only run, omit badge ownership calls:
 
 ```powershell
