@@ -1,6 +1,6 @@
 -- Hosted script and universe list; only progress is stored locally.
 local BASE_URL = "https://raw.githubusercontent.com/amyyzing/roblox-badge-farm/main/"
-local LOADER = 'loadstring(game:HttpGet("' .. BASE_URL .. 'badge-farm.lua"))()'
+local LOADER = 'getgenv().BadgeFarmResume = true; loadstring(game:HttpGet("' .. BASE_URL .. 'badge-farm.lua"))()'
 local Players = game:GetService("Players")
 local Teleports = game:GetService("TeleportService")
 local Http = game:GetService("HttpService")
@@ -9,6 +9,8 @@ local queue = queue_on_teleport or queueonteleport or (syn and syn.queue_on_tele
 assert(readfile and writefile and isfile and queue, "File access and queue_on_teleport are required.")
 
 local env = getgenv()
+local resume = env.BadgeFarmResume == true
+env.BadgeFarmResume = nil
 if env.BadgeFarmStop then env.BadgeFarmStop() end
 local player = Players.LocalPlayer
 while not player do task.wait(); player = Players.LocalPlayer end
@@ -29,10 +31,16 @@ for _, oldGui in ipairs(playerGui:GetChildren()) do
 end
 local stateFile = "badge-farm-" .. player.UserId .. ".json"
 local state = { enabled = false, visited = {} }
-if isfile(stateFile) then
+if resume and isfile(stateFile) then
     state = Http:JSONDecode(readfile(stateFile))
     assert(type(state) == "table" and type(state.visited) == "table", "Invalid badge farm save; rename it to reset.")
+    if not state.enabled or state.resumeTarget ~= tostring(game.GameId) then
+        state = { enabled = false, visited = {} }
+    end
 end
+state.resumeTarget = nil
+-- Manual execution starts fresh. Only a queued farm teleport resumes progress.
+writefile(stateFile, Http:JSONEncode(state))
 
 local ids, seen = {}, {}
 for line in game:HttpGet(BASE_URL .. "games.txt"):gmatch("[^\r\n]+") do
@@ -88,6 +96,7 @@ stopEvent.Parent = gui
 table.insert(connections, stopEvent.Event:Connect(env.BadgeFarmStop))
 table.insert(connections, button.Activated:Connect(function()
     state.enabled = not state.enabled
+    state.resumeTarget = nil
     if state.enabled then
         deadline = os.clock() + 10
         markCurrent()
@@ -117,6 +126,8 @@ local function teleportFailed(message)
     if not pending then return end
     local id = pending.id
     pending = nil
+    state.resumeTarget = nil
+    pcall(save)
     local text = tostring(message):lower()
     if text:find("different creator", 1, true) or text:find("third party", 1, true) then
         stopWithError("This game blocks teleports to other creators. Join another game manually, then turn ON again.")
@@ -182,6 +193,7 @@ task.spawn(function()
                     end
                     if not running then return end
                     local success, err = pcall(function()
+                        state.resumeTarget = nextId
                         save()
                         if not queued then
                             queue(LOADER)
