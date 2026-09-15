@@ -114,7 +114,15 @@ class BadgeRouteApp:
         if self._is_running():
             return
         try:
-            user_id = int(self.user_id_var.get().strip()) if self.badge_check_var.get() else None
+            user_id = None
+            if self.badge_check_var.get():
+                user_id_text = self.user_id_var.get().strip()
+                if not user_id_text:
+                    raise ValueError("enter a positive Roblox user ID")
+                try:
+                    user_id = int(user_id_text)
+                except ValueError as exc:
+                    raise ValueError("Roblox user ID must be a whole number") from exc
             seconds = float(self.seconds_var.get())
             startup_seconds = float(self.startup_var.get())
             if self.badge_check_var.get() and (user_id is None or user_id <= 0):
