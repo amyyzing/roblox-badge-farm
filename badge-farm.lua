@@ -43,6 +43,9 @@ state.resumeTarget = nil
 writefile(stateFile, Http:JSONEncode(state))
 
 local ids, seen = {}, {}
+-- These experiences have been observed to reject outbound cross-creator teleports.
+-- Keep them last so they can still be visited, but do not strand the route early.
+local terminalUniverses = { ["7065948"] = true } -- Innovation Labs
 for line in game:HttpGet(BASE_URL .. "games.txt"):gmatch("[^\r\n]+") do
     local id = line:match("^%s*(%d+)%s*$")
     assert(id, "games.txt must contain one universe ID per line.")
@@ -53,6 +56,14 @@ for line in game:HttpGet(BASE_URL .. "games.txt"):gmatch("[^\r\n]+") do
     end
 end
 assert(#ids > 0, "games.txt is empty.")
+do
+    local regular, terminal = {}, {}
+    for _, id in ipairs(ids) do
+        table.insert(terminalUniverses[id] and terminal or regular, id)
+    end
+    for _, id in ipairs(terminal) do table.insert(regular, id) end
+    ids = regular
+end
 
 local running, earned, pending, queued = true, false, nil, false
 local deadline = os.clock() + 10
@@ -184,7 +195,12 @@ task.spawn(function()
                 if not state.visited[id] and not skipped[id] then nextId = id; break end
             end
             if not nextId then
-                stopWithError("Finished available games. Failed games can be retried by rerunning the script.")
+                while running and state.enabled and not earned and os.clock() < deadline do
+                    task.wait(0.05)
+                end
+                if running then
+                    stopWithError("Finished available games. Failed games can be retried by rerunning the script.")
+                end
             else
                 local ok, place, info = pcall(resolve, nextId)
                 if not running then return end

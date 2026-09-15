@@ -18,6 +18,8 @@ If the current game blocks teleports to other creators, the farm pauses. Manuall
 
 The cross-creator restriction is enforced by Roblox. `TeleportService` cannot override it from an executor. Each hop originates in the game you are currently playing, so an arbitrary list of unrelated experiences cannot be chained unless each current experience permits third-party teleports. An owned hub can allow the first hop, but it cannot change the setting on the destination games. The script now reports the blocked hop and stops instead of pretending it is an age restriction.
 
+Innovation Labs (`7065948`) is currently kept at the end of the hosted route because its outbound restriction was observed live. It can still be visited for its badge, but the route ends there. Other restricted experiences may need the same treatment if Roblox rejects their outbound hop.
+
 Requires executor support for file access, `getgenv`, `game:HttpGet`, `loadstring`, and `queue_on_teleport` (or its supported aliases). Automatic continuation depends on the executor running queued scripts after teleport. This is not a normal Studio LocalScript.
 
 Early departure uses Roblox's restricted badge events. If the executor cannot connect to them, the script warns and uses the timer. Events awarded before the script starts listening may be missed. Live badge delivery and cross-game continuation still need testing in your executor.
