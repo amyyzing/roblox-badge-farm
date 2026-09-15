@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -15,17 +18,68 @@ import direct_badge_route as route
 
 
 ROOT = Path(__file__).resolve().parent
+LOCK_PATH = ROOT / ".badge-route-ui.lock"
+
+
+class InstanceLock:
+    """Keep two controller windows from launching competing workers."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.held = False
+
+    def acquire(self) -> None:
+        for _ in range(2):
+            try:
+                descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                try:
+                    raw_pid = self.path.read_text(encoding="ascii").strip()
+                    pid = int(raw_pid)
+                    if pid > 0:
+                        try:
+                            os.kill(pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        except PermissionError as exc:
+                            raise RuntimeError("another badge route controller is already running") from exc
+                        else:
+                            raise RuntimeError("another badge route controller is already running")
+                except (OSError, ValueError):
+                    pass
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    continue
+                continue
+            else:
+                with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+                    handle.write(f"{os.getpid()}\n")
+                self.held = True
+                return
+        raise RuntimeError("could not acquire the badge route controller lock")
+
+    def release(self) -> None:
+        if not self.held:
+            return
+        self.held = False
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 class BadgeRouteApp:
-    def __init__(self, window: tk.Tk) -> None:
+    def __init__(self, window: tk.Tk, instance_lock: InstanceLock) -> None:
         self.window = window
+        self.instance_lock = instance_lock
         self.window.title("Roblox Badge Route")
         self.window.geometry("700x500")
         self.window.minsize(620, 420)
         self.worker: subprocess.Popen[str] | None = None
         self.output_queue: queue.Queue[str] = queue.Queue()
         self.stop_requested = False
+        self.closing = False
 
         self.games_var = tk.StringVar(value=str(ROOT / "games.txt"))
         self.state_var = tk.StringVar(value=str(ROOT / "badge-route-state.json"))
@@ -39,6 +93,7 @@ class BadgeRouteApp:
         self.progress_var = tk.StringVar(value="0 / 0 completed")
         self.badges_var = tk.StringVar(value="0 badge games")
         self.failed_var = tk.StringVar(value="0 failed")
+        self.inconclusive_var = tk.StringVar(value="0 inconclusive")
         self.current_var = tk.StringVar(value="No destination running")
 
         self._build_ui()
@@ -90,6 +145,7 @@ class BadgeRouteApp:
         ttk.Label(stats, textvariable=self.progress_var).pack(side="left", padx=(0, 16))
         ttk.Label(stats, textvariable=self.badges_var).pack(side="left", padx=(0, 16))
         ttk.Label(stats, textvariable=self.failed_var).pack(side="left")
+        ttk.Label(stats, textvariable=self.inconclusive_var).pack(side="left", padx=(16, 0))
 
         self.progress = ttk.Progressbar(outer, mode="determinate")
         self.progress.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(0, 8))
@@ -107,11 +163,26 @@ class BadgeRouteApp:
     def _is_running(self) -> bool:
         return self.worker is not None and self.worker.poll() is None
 
+    def _external_worker_running(self) -> bool:
+        """Recognize a worker started by another shell or controller window."""
+
+        try:
+            pid = int((ROOT / ".badge-route-worker.lock").read_text(encoding="ascii").strip())
+            if pid <= 0:
+                return False
+            os.kill(pid, 0)
+            return True
+        except (FileNotFoundError, OSError, ValueError):
+            return False
+
+    def _route_is_running(self) -> bool:
+        return self._is_running() or self._external_worker_running()
+
     def _write_control(self, command: str) -> None:
         route.write_json_file(ROOT / ".badge-route-ui-control.json", {"command": command})
 
     def _start(self) -> None:
-        if self._is_running():
+        if self._route_is_running():
             return
         try:
             user_id = None
@@ -127,6 +198,8 @@ class BadgeRouteApp:
             startup_seconds = float(self.startup_var.get())
             if self.badge_check_var.get() and (user_id is None or user_id <= 0):
                 raise ValueError("enter a positive Roblox user ID")
+            if not math.isfinite(seconds) or not math.isfinite(startup_seconds):
+                raise ValueError("timers must be finite numbers")
             if seconds < 0 or startup_seconds < 0:
                 raise ValueError("timers must be non-negative")
         except ValueError as exc:
@@ -138,6 +211,19 @@ class BadgeRouteApp:
         badge_output_path = Path(self.badge_output_var.get()).expanduser()
         status_path = ROOT / ".badge-route-ui-status.json"
         control_path = ROOT / ".badge-route-ui-control.json"
+        try:
+            route.validate_paths(
+                {
+                    "games": games_path,
+                    "state": state_path,
+                    "badge output": badge_output_path,
+                    "status": status_path,
+                    "control": control_path,
+                }
+            )
+        except route.RouteError as exc:
+            messagebox.showerror("Invalid paths", str(exc))
+            return
         command = [
             sys.executable,
             "-u",
@@ -156,6 +242,8 @@ class BadgeRouteApp:
             str(status_path),
             "--control-file",
             str(control_path),
+            "--lock-file",
+            str(ROOT / ".badge-route-worker.lock"),
         ]
         if self.launch_var.get():
             command.append("--launch")
@@ -190,17 +278,18 @@ class BadgeRouteApp:
             self.output_queue.put(line.rstrip())
 
     def _command(self, command: str) -> None:
-        if self._is_running():
+        if self._route_is_running():
             self._write_control(command)
             self._append_log(command.capitalize() + " requested")
 
     def _stop(self) -> None:
-        if not self._is_running():
+        if not self._route_is_running():
             return
         self.stop_requested = True
         self._write_control("stop")
         self._append_log("Stop requested")
-        self.window.after(5000, self._force_stop_if_needed)
+        if self._is_running():
+            self.window.after(5000, self._force_stop_if_needed)
 
     def _force_stop_if_needed(self) -> None:
         if self._is_running() and self.stop_requested:
@@ -223,10 +312,11 @@ class BadgeRouteApp:
             messagebox.showinfo("Route running", "Stop the route before clearing the badge list.")
             return
         path = Path(self.badge_output_var.get()).expanduser()
+        state_path = Path(self.state_var.get()).expanduser()
         try:
-            route.write_universe_ids(path, [])
+            route.clear_badge_results(state_path, path)
             self._append_log("Badge output cleared")
-        except OSError as exc:
+        except (OSError, route.RouteError) as exc:
             messagebox.showerror("Clear failed", str(exc))
 
     def _append_log(self, message: str) -> None:
@@ -252,12 +342,13 @@ class BadgeRouteApp:
             self.progress_var.set(f"{completed} / {total} completed")
             self.badges_var.set(f"{int(status.get('badges', 0))} badge games")
             self.failed_var.set(f"{int(status.get('failed', 0))} failed")
+            self.inconclusive_var.set(f"{int(status.get('inconclusive', 0))} inconclusive")
             current = status.get("current_name") or status.get("current_universe")
             self.current_var.set(f"Current: {current}" if current else str(status.get("message") or "No destination running"))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             self.current_var.set("No status yet")
 
-        running = self._is_running()
+        running = self._route_is_running()
         self.start_button.configure(state="disabled" if running else "normal")
         for button in (self.pause_button, self.resume_button, self.stop_button):
             button.configure(state="normal" if running else "disabled")
@@ -273,16 +364,46 @@ class BadgeRouteApp:
         self.window.after(500, self._refresh)
 
     def _close(self) -> None:
-        if self._is_running() and not messagebox.askyesno("Route is running", "Stop the route and close the controller?"):
+        if self._route_is_running() and not messagebox.askyesno("Route is running", "Stop the route and close the controller?"):
             return
         if self._is_running():
+            self.closing = True
+            self.stop_requested = True
             self._write_control("stop")
+            self._append_log("Stopping route before closing")
+            self._close_deadline = time.monotonic() + 5.0
+            self.window.after(100, self._finish_close)
+            return
+        if self._external_worker_running():
+            self._write_control("stop")
+            self._append_log("Stop requested for route worker")
+        self.instance_lock.release()
         self.window.destroy()
+
+    def _finish_close(self) -> None:
+        if not self._is_running():
+            self.instance_lock.release()
+            self.window.destroy()
+            return
+        if time.monotonic() >= getattr(self, "_close_deadline", 0.0):
+            self.worker.terminate()
+            self._append_log("Worker terminated after it did not stop")
+            self.instance_lock.release()
+            self.window.destroy()
+            return
+        self.window.after(100, self._finish_close)
 
 
 def main() -> None:
     window = tk.Tk()
-    BadgeRouteApp(window)
+    instance_lock = InstanceLock(LOCK_PATH)
+    try:
+        instance_lock.acquire()
+    except RuntimeError as exc:
+        messagebox.showerror("Already running", str(exc), parent=window)
+        window.destroy()
+        return
+    BadgeRouteApp(window, instance_lock)
     window.mainloop()
 
 

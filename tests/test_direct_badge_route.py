@@ -1,7 +1,9 @@
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 import direct_badge_route as route
 
@@ -90,6 +92,58 @@ class DirectBadgeRouteTests(unittest.TestCase):
         self.assertEqual(baseline, set())
         self.assertEqual(checker.find_new(["11"], baseline), "11")
 
+    def test_ownership_response_requires_a_boolean(self):
+        with self.assertRaises(route.RouteError):
+            route._owned_value({})
+        with self.assertRaises(route.RouteError):
+            route._owned_value({"isOwned": "false"})
+        self.assertFalse(route._owned_value({"isOwned": False}))
+
+    def test_poll_seconds_controls_badge_request_schedule(self):
+        clock = FakeClock()
+        calls = []
+
+        def request_json(url):
+            calls.append(clock.value)
+            return {"isOwned": False}
+
+        checker = route.BadgeChecker(
+            7,
+            request_json=request_json,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+            min_interval=0,
+        )
+        for _ in range(3):
+            checker.find_new(["11", "12", "13"], set())
+            clock.sleep(10)
+        self.assertEqual(calls, [0.0, 10.0, 20.0])
+
+    def test_http_404_is_not_retried(self):
+        calls = []
+
+        def fail(url, timeout):
+            calls.append(url)
+            raise urllib.error.HTTPError(url, 404, "missing", {}, None)
+
+        with mock.patch.object(route, "_request_json_once", side_effect=fail):
+            with self.assertRaises(route.RouteError):
+                route.get_json("https://example.test", retries=3, sleep=lambda _: self.fail("unexpected retry"))
+        self.assertEqual(len(calls), 1)
+
+    def test_rate_limit_sets_shared_cooldown_without_retry(self):
+        clock = FakeClock()
+        cooldown = route.RequestCooldown(monotonic=clock.monotonic)
+        url = "https://example.test"
+
+        def fail(request_url, timeout):
+            raise urllib.error.HTTPError(request_url, 429, "rate limited", {"Retry-After": "60"}, None)
+
+        with mock.patch.object(route, "_request_json_once", side_effect=fail):
+            with self.assertRaises(route.RouteError):
+                route.get_json(url, retries=1, sleep=clock.sleep, cooldown=cooldown, monotonic=clock.monotonic)
+        self.assertEqual(cooldown.next_allowed, 60.0)
+
     def test_run_route_launches_and_saves_completion(self):
         clock = FakeClock()
         launched = []
@@ -153,6 +207,7 @@ class DirectBadgeRouteTests(unittest.TestCase):
     def test_badge_checks_cannot_extend_route_time_budget(self):
         clock = FakeClock()
         state = route.new_state()
+        launched_at = []
 
         def request_json(url):
             if "badges.roblox.com" in url:
@@ -170,27 +225,59 @@ class DirectBadgeRouteTests(unittest.TestCase):
             request_json=request_json,
             sleep=clock.sleep,
             monotonic=clock.monotonic,
-            launch_fn=lambda _: None,
+            launch_fn=lambda _: launched_at.append(clock.value),
             output=lambda _: None,
         )
 
-        self.assertEqual(clock.value, 3)
-        self.assertEqual(state["completed_universes"], ["1"])
+        self.assertEqual(clock.value - launched_at[0], 3)
+        self.assertEqual(state["completed_universes"], [])
+        self.assertIn("1", state["inconclusive_universes"])
 
     def test_state_round_trip_is_atomic_shape(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
             state = route.new_state()
+            state["user_id"] = "7"
             state["completed_universes"].append("5")
             state["failed_universes"]["9"] = "missing"
             state["badge_universes"].append("5")
+            state["inconclusive_universes"]["9"] = "badge check failed"
+            state["visit_statuses"]["5"] = "no_new_badge_observed"
             state["last_universe"] = "5"
             route.save_state(path, state)
-            loaded = route.load_state(path)
+            loaded = route.load_state(path, expected_user_id=7)
+            self.assertEqual(loaded["user_id"], "7")
             self.assertEqual(loaded["completed_universes"], ["5"])
             self.assertEqual(loaded["failed_universes"], {"9": "missing"})
             self.assertEqual(loaded["badge_universes"], ["5"])
+            self.assertEqual(loaded["inconclusive_universes"], {"9": "badge check failed"})
+            self.assertEqual(loaded["visit_statuses"], {"5": "no_new_badge_observed"})
             self.assertFalse(path.with_name("state.json.tmp").exists())
+
+    def test_state_rejects_a_different_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            route.save_state(path, route.new_state(7))
+            with self.assertRaises(route.RouteError):
+                route.load_state(path, expected_user_id=999)
+
+    def test_paths_must_not_collide(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "games.txt"
+            with self.assertRaises(route.RouteError):
+                route.validate_paths({"games": path, "badge output": path})
+
+    def test_clear_badge_results_clears_state_and_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            output_path = Path(directory) / "game-badges.txt"
+            state = route.new_state(7)
+            state["badge_universes"] = ["1", "2"]
+            route.save_state(state_path, state)
+            route.write_universe_ids(output_path, ["1", "2"])
+            route.clear_badge_results(state_path, output_path)
+            self.assertEqual(route.load_state(state_path)["badge_universes"], [])
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "")
 
     def test_pause_resume_extends_the_timer_and_reports_status(self):
         with tempfile.TemporaryDirectory() as directory:

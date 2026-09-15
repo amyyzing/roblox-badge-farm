@@ -24,7 +24,7 @@ Preview the first three uncompleted destinations without opening Roblox:
 py direct_badge_route.py --dry-run --limit 3
 ```
 
-Run the route for a Roblox user ID. Each destination gets a five-second startup allowance, then a ten-second window. A newly owned badge advances the route immediately; otherwise the timer advances it. Badge lookups use that same per-destination time budget, so a slow or rate-limited ownership endpoint falls back to the timer instead of holding the route open:
+Run the route for a Roblox user ID. The controller takes a short badge snapshot before opening each destination (capped at two seconds), then gives Roblox the configured startup allowance and stay window. A newly owned badge advances the route immediately; otherwise the timer advances it. Badge requests have a hard deadline, so a slow or rate-limited ownership endpoint cannot hold the route open:
 
 ```powershell
 py direct_badge_route.py --user-id YOUR_USER_ID --launch
@@ -32,7 +32,7 @@ py direct_badge_route.py --user-id YOUR_USER_ID --launch
 
 That command processes every uncompleted ID in `games.txt`; leave out `--limit` for the full list. Destination lookups are paced and retry Roblox rate-limit responses, so a large list can take a little time to prepare.
 
-`games.txt` is the input source. When the ownership check sees a new badge, the controller writes that universe ID to `game-badges.txt`, one ID per line in the same format. The output is kept in the order of `games.txt` and contains each ID once. Delete `game-badges.txt` if you want to rebuild the results from scratch.
+`games.txt` is the input source. When the ownership check sees a new badge, the controller writes that universe ID to `game-badges.txt`, one ID per line in the same format. The output is kept in the order of `games.txt` and contains each ID once. The JSON state is authoritative, so deleting the text file alone does not erase results; use **Clear badge list** in the desktop app (or call `clear_badge_results` from Python) to clear both files.
 
 For a timer-only run, omit badge ownership calls:
 
@@ -46,7 +46,7 @@ Reset saved progress:
 py direct_badge_route.py --reset
 ```
 
-The default is a dry-run. `--launch` is required before any Roblox window is opened. A launch failure is recorded and the controller continues to the next destination; it can be retried after resetting or editing the saved state. The badge ownership endpoint is rate-limited, so a slow check may fall back to the timer for that destination. Roblox access rules, age/content restrictions, private servers, and experiences that do not award a badge cannot be bypassed by this tool.
+The default is a dry-run. `--launch` is required before any Roblox window is opened. A launch failure is recorded and the controller continues to the next destination; it can be retried after resetting or editing the saved state. If the badge list or ownership response is unavailable, that destination is marked **inconclusive** instead of completed and is retried on a later run. State is tied to the supplied Roblox user ID, and input, output, state, status, and control paths must be different files. Roblox access rules, age/content restrictions, private servers, and experiences that do not award a badge cannot be bypassed by this tool.
 
 The linked [Roblox Account Manager Pro](https://github.com/TheFadGhost/roblox-account-manager-pro-public) repository can be used as a separate account/session launcher, but this controller intentionally does not read cookies or automate an executor. Roblox must already be installed and associated with the `roblox://` protocol.
 
