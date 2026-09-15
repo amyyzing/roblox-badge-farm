@@ -150,6 +150,33 @@ class DirectBadgeRouteTests(unittest.TestCase):
         self.assertEqual(state["badge_universes"], ["1"])
         self.assertEqual(saved_badges, [["1"]])
 
+    def test_badge_checks_cannot_extend_route_time_budget(self):
+        clock = FakeClock()
+        state = route.new_state()
+
+        def request_json(url):
+            if "badges.roblox.com" in url:
+                return {"data": [{"id": 11}, {"id": 12}, {"id": 13}, {"id": 14}], "nextPageCursor": None}
+            return {"isOwned": False}
+
+        route.run_route(
+            ["1"],
+            state=state,
+            destinations={"1": {"place_id": 101, "name": "One"}},
+            user_id=7,
+            seconds=2,
+            startup_seconds=1,
+            launch=True,
+            request_json=request_json,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+            launch_fn=lambda _: None,
+            output=lambda _: None,
+        )
+
+        self.assertEqual(clock.value, 3)
+        self.assertEqual(state["completed_universes"], ["1"])
+
     def test_state_round_trip_is_atomic_shape(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"

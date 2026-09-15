@@ -193,6 +193,8 @@ def list_badge_ids(
     universe_id: str,
     *,
     request_json: Callable[[str], Any] = get_json,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> list[str]:
     """List all badge IDs belonging to a universe."""
 
@@ -201,6 +203,8 @@ def list_badge_ids(
     cursor: str | None = None
     seen_cursors: set[str] = set()
     while True:
+        if deadline is not None and monotonic() >= deadline:
+            raise RouteError("badge check time budget expired")
         params = {"limit": "100", "sortOrder": "Asc"}
         if cursor:
             params["cursor"] = cursor
@@ -250,38 +254,64 @@ class BadgeChecker:
         self.min_interval = max(0.0, float(min_interval))
         self._last_request: float | None = None
         self._known_owned: set[str] = set()
+        self.timed_out = False
 
-    def _is_owned(self, badge_id: str) -> bool:
+    def _is_owned(self, badge_id: str, *, deadline: float | None = None) -> bool | None:
         now = self.monotonic()
+        if deadline is not None and now >= deadline:
+            self.timed_out = True
+            return None
         if self._last_request is not None:
             delay = self.min_interval - (now - self._last_request)
             if delay > 0:
+                if deadline is not None:
+                    delay = min(delay, max(0.0, deadline - now))
                 self.sleep(delay)
+                if deadline is not None and self.monotonic() >= deadline:
+                    self.timed_out = True
+                    return None
         url = OWNERSHIP_API.format(user_id=self.user_id, badge_id=badge_id)
         payload = self.request_json(url)
         self._last_request = self.monotonic()
+        if deadline is not None and self._last_request >= deadline:
+            self.timed_out = True
+            return None
         owned = _owned_value(payload)
         if owned:
             self._known_owned.add(str(badge_id))
         return owned
 
-    def snapshot(self, badge_ids: Iterable[str]) -> set[str]:
+    def snapshot(self, badge_ids: Iterable[str], *, deadline: float | None = None) -> set[str]:
         """Return the badges already owned before entering a destination."""
 
+        self.timed_out = False
         baseline: set[str] = set()
         for badge_id in badge_ids:
-            if self._is_owned(str(badge_id)):
+            owned = self._is_owned(str(badge_id), deadline=deadline)
+            if owned is None:
+                break
+            if owned:
                 baseline.add(str(badge_id))
         return baseline
 
-    def find_new(self, badge_ids: Iterable[str], baseline: set[str]) -> str | None:
+    def find_new(
+        self,
+        badge_ids: Iterable[str],
+        baseline: set[str],
+        *,
+        deadline: float | None = None,
+    ) -> str | None:
         """Return the first badge that changed from unowned to owned."""
 
+        self.timed_out = False
         for badge_id in badge_ids:
             badge_id = str(badge_id)
             if badge_id in baseline or badge_id in self._known_owned:
                 continue
-            if self._is_owned(badge_id):
+            owned = self._is_owned(badge_id, deadline=deadline)
+            if owned is None:
+                break
+            if owned:
                 return badge_id
         return None
 
@@ -375,6 +405,7 @@ def run_route(
     save_badges: Callable[[dict[str, Any]], None] | None = None,
     control_file: Path | None = None,
     status_update: Callable[[str, str | None, str | None, str | None], None] | None = None,
+    badge_request_json: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
     """Process the route once and return the updated state."""
 
@@ -384,7 +415,12 @@ def run_route(
         raise RouteError("seconds and startup settings must be non-negative; poll-seconds must be positive")
 
     checker = (
-        BadgeChecker(user_id, request_json=request_json, sleep=sleep, monotonic=monotonic)
+        BadgeChecker(
+            user_id,
+            request_json=badge_request_json or request_json,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
         if launch and badge_check and user_id is not None
         else None
     )
@@ -429,18 +465,6 @@ def run_route(
             output(f"skip {universe_id}: {message}")
             continue
 
-        badge_ids: list[str] = []
-        baseline: set[str] = set()
-        badge_poll_enabled = checker is not None
-        if checker is not None:
-            try:
-                badge_ids = list_badge_ids(universe_id, request_json=request_json)
-                if badge_ids:
-                    baseline = checker.snapshot(badge_ids)
-            except RouteError as exc:
-                output(f"badge check unavailable for {universe_id}: {exc}; using the timer")
-                badge_poll_enabled = False
-
         uri = build_launch_uri(destination["place_id"])
         title = destination.get("name") or universe_id
         wait_if_paused(None, universe_id, title)
@@ -459,9 +483,31 @@ def run_route(
             output(f"skip {universe_id}: {message}")
             continue
 
-        if startup_seconds:
-            sleep(startup_seconds)
-        deadline = monotonic() + seconds
+        launch_started = monotonic()
+        deadline = launch_started + startup_seconds + seconds
+        badge_ids: list[str] = []
+        baseline: set[str] = set()
+        badge_poll_enabled = checker is not None
+        if checker is not None:
+            try:
+                badge_ids = list_badge_ids(
+                    universe_id,
+                    request_json=badge_request_json or request_json,
+                    deadline=deadline,
+                    monotonic=monotonic,
+                )
+                if badge_ids:
+                    baseline = checker.snapshot(badge_ids, deadline=deadline)
+                if checker.timed_out:
+                    output(f"badge check timed out for {universe_id}; using the timer")
+                    badge_poll_enabled = False
+            except RouteError as exc:
+                output(f"badge check unavailable for {universe_id}: {exc}; using the timer")
+                badge_poll_enabled = False
+
+        startup_remaining = launch_started + startup_seconds - monotonic()
+        if startup_remaining > 0:
+            sleep(startup_remaining)
         emit("waiting", universe_id, title, f"{seconds:g}-second window")
         awarded: str | None = None
         while monotonic() < deadline:
@@ -472,7 +518,7 @@ def run_route(
                 break
             if badge_poll_enabled and checker is not None and badge_ids:
                 try:
-                    awarded = checker.find_new(badge_ids, baseline)
+                    awarded = checker.find_new(badge_ids, baseline, deadline=deadline)
                 except RouteError as exc:
                     output(f"badge check unavailable in {universe_id}: {exc}; using the timer")
                     badge_poll_enabled = False
@@ -600,6 +646,11 @@ def main(argv: list[str] | None = None) -> int:
         def controlled_request(url: str) -> Any:
             return get_json(url, sleep=controlled_sleep)
 
+        def controlled_badge_request(url: str) -> Any:
+            # Badge polling must not hold a destination open behind the route
+            # timer when Roblox is slow or rate-limits the ownership endpoint.
+            return get_json(url, timeout=3.0, retries=1, sleep=controlled_sleep)
+
         source_ids = set(universe_ids)
         output_badges = (
             [item for item in parse_universe_ids(args.badge_output, allow_empty=True) if item in source_ids]
@@ -649,6 +700,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             control_file=args.control_file,
             status_update=status_update,
+            badge_request_json=controlled_badge_request,
         )
         save_state(args.state, state)
         update_status("finished", message="route complete")

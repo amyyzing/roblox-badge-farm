@@ -24,7 +24,7 @@ Preview the first three uncompleted destinations without opening Roblox:
 py direct_badge_route.py --dry-run --limit 3
 ```
 
-Run the route for a Roblox user ID. Each destination gets a five-second startup allowance, then a ten-second window. A newly owned badge advances the route immediately; otherwise the timer advances it:
+Run the route for a Roblox user ID. Each destination gets a five-second startup allowance, then a ten-second window. A newly owned badge advances the route immediately; otherwise the timer advances it. Badge lookups use that same per-destination time budget, so a slow or rate-limited ownership endpoint falls back to the timer instead of holding the route open:
 
 ```powershell
 py direct_badge_route.py --user-id YOUR_USER_ID --launch
@@ -46,7 +46,7 @@ Reset saved progress:
 py direct_badge_route.py --reset
 ```
 
-The default is a dry-run. `--launch` is required before any Roblox window is opened. A launch failure is recorded and the controller continues to the next destination; it can be retried after resetting or editing the saved state. The badge ownership endpoint is rate-limited, so games with many badges take longer to baseline. Roblox access rules, age/content restrictions, private servers, and experiences that do not award a badge cannot be bypassed by this tool.
+The default is a dry-run. `--launch` is required before any Roblox window is opened. A launch failure is recorded and the controller continues to the next destination; it can be retried after resetting or editing the saved state. The badge ownership endpoint is rate-limited, so a slow check may fall back to the timer for that destination. Roblox access rules, age/content restrictions, private servers, and experiences that do not award a badge cannot be bypassed by this tool.
 
 The linked [Roblox Account Manager Pro](https://github.com/TheFadGhost/roblox-account-manager-pro-public) repository can be used as a separate account/session launcher, but this controller intentionally does not read cookies or automate an executor. Roblox must already be installed and associated with the `roblox://` protocol.
 
