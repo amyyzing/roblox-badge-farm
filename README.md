@@ -12,7 +12,9 @@ The list uses one **universe ID** per line. Update `games.txt` in this repositor
 
 The script resolves each universe's starting place, skips visited universes, and requests the next teleport after 10 seconds or a detected badge award. The timer begins when the script resumes, or when you turn it on. Network lookups and Roblox loading can add time; the script cannot force Roblox to complete a teleport immediately. A teleport already requested cannot be canceled with OFF.
 
-Progress and ON/OFF state persist in `badge-farm-<user ID>.json`. Only games actually reached while enabled are marked visited. Delete that file while the script is stopped to reset progress. Failed lookups and rejected teleports are skipped for the current script session and remain eligible on a later run.
+Progress and ON/OFF state persist in `badge-farm-<user ID>.json`. Only games actually reached while enabled are marked visited. Delete that file while the script is stopped to reset progress. Missing destinations and rejected destination teleports are skipped for the current script session and remain eligible on a later run.
+
+If the current game blocks teleports to other creators, the farm pauses: join another game manually and turn it on again. Restricted destinations are skipped with a 3-second cooldown. Temporary lookup or JSON errors retry the same destination after 15 and 30 seconds, then pause after the third failure. Roblox's own error dialog can still appear when it rejects a teleport.
 
 Requires executor support for file access, `getgenv`, `game:HttpGet`, `loadstring`, and `queue_on_teleport` (or its supported aliases). Automatic continuation depends on the executor running queued scripts after teleport. This is not a normal Studio LocalScript.
 

@@ -33,6 +33,7 @@ assert(#ids > 0, "games.txt is empty.")
 
 local running, earned, pending, queued = true, false, nil, false
 local deadline = os.clock() + 10
+local retryAt, lookupFailures = 0, 0
 local skipped, connections = {}, {}
 local gui = Instance.new("ScreenGui")
 gui.Name = "BadgeFarm"
@@ -93,12 +94,21 @@ for _, name in ipairs({ "BadgeAwarded", "OnBadgeAwarded" }) do
 end
 if badgeEventCount == 0 then warn("Badge farm: badge events unavailable; using the 10-second timer.") end
 
-table.insert(connections, Teleports.TeleportInitFailed:Connect(function(who, _, message, placeId)
-    if who == player and pending and pending.place == placeId then
-        skipped[pending.id] = true
-        pending = nil
-        warn("Badge farm: teleport failed; skipping for this session. " .. tostring(message))
+local function teleportFailed(message)
+    if not pending then return end
+    local id = pending.id
+    pending = nil
+    local text = tostring(message):lower()
+    if text:find("different creator", 1, true) or text:find("third party", 1, true) then
+        stopWithError("This game blocks teleports to other creators. Join another game manually, then turn ON again.")
+    else
+        skipped[id] = true
+        retryAt = os.clock() + 3
+        warn("Badge farm: destination " .. id .. " rejected; trying another in 3 seconds. " .. tostring(message))
     end
+end
+table.insert(connections, Teleports.TeleportInitFailed:Connect(function(who, _, message, placeId)
+    if who == player and pending and pending.place == placeId then teleportFailed(message) end
 end))
 
 local function resolve(id)
@@ -108,7 +118,7 @@ local function resolve(id)
             return info.rootPlaceId
         end
     end
-    error("No starting place found for " .. id)
+    return nil -- A valid response with no destination; safe to skip this ID.
 end
 
 updateButton()
@@ -121,7 +131,7 @@ end
 -- Resolve the next destination during the current game's waiting period.
 task.spawn(function()
     while running do
-        if not state.enabled or pending then
+        if not state.enabled or pending or os.clock() < retryAt then
             task.wait(0.1)
         else
             local nextId
@@ -132,11 +142,22 @@ task.spawn(function()
                 stopWithError("Finished available games. Failed games can be retried by rerunning the script.")
             else
                 local ok, place = pcall(resolve, nextId)
+                if not running then return end
                 if not ok then
+                    lookupFailures = lookupFailures + 1
+                    if lookupFailures >= 3 then
+                        stopWithError("Game lookup failed three times. Wait a minute, then turn ON to retry.")
+                        lookupFailures = 0
+                    else
+                        retryAt = os.clock() + 15 * lookupFailures
+                        warn("Badge farm: game lookup unavailable; keeping this destination and retrying after a cooldown.")
+                    end
+                elseif not place then
+                    lookupFailures = 0
                     skipped[nextId] = true
-                    warn("Badge farm: " .. tostring(place))
-                    task.wait(1)
+                    retryAt = os.clock() + 3
                 else
+                    lookupFailures = 0
                     while running and (not state.enabled or (not earned and os.clock() < deadline)) do
                         task.wait(0.05)
                     end
@@ -154,10 +175,7 @@ task.spawn(function()
                         pending = { id = nextId, place = place }
                         local sent, message = pcall(function() Teleports:Teleport(place, player) end)
                         if not sent then
-                            skipped[nextId] = true
-                            pending = nil
-                            warn("Badge farm: " .. tostring(message))
-                            task.wait(1)
+                            teleportFailed(message)
                         end
                         -- Wait for arrival or TeleportInitFailed; overlapping teleports are unsafe.
                     end
